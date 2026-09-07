@@ -269,10 +269,48 @@ def _get_server_argparser():
                         required=False, default=8443,
                         help="port where the management service resides")
     parser.add_argument("-e", "--truststore", metavar="TRUSTSTORE_FILE",
-                        default=False, required=False,
-                        help="""name of file containing one or more CA pems
-                            to use in validating the management server""")
+                        default=None, required=False,
+                        help="""file with one or more PEM CA certificates used
+                            to validate the management server's certificate
+                            (for a server certificate issued by a private CA,
+                            e.g. the ePO server CA). Without this option the
+                            certificate is validated against the system's
+                            trusted CAs.""")
+    parser.add_argument("--insecure", action="store_true", default=False,
+                        help="""do not validate the management server's
+                            certificate at all (not recommended; use -e with
+                            the server's CA instead)""")
     return parser
+
+
+def _server_verify_from_cli_args(args):
+    """
+    Derive the certificate validation setting for the management server from
+    the parsed cli arguments.
+
+    :param argparse.Namespace args: parsed cli arguments (``truststore`` and
+        ``insecure`` attributes)
+    :return: ``False`` when validation is disabled (``--insecure``), the path
+        of the CA file when ``-e/--truststore`` was given, ``True`` (system
+        trusted CAs) otherwise
+    :rtype: bool or str
+    :raise Exception: if both ``--insecure`` and ``-e`` were given or the
+        truststore file does not exist
+    """
+    truststore = getattr(args, "truststore", None)
+    if getattr(args, "insecure", False):
+        if truststore:
+            raise Exception(
+                "--insecure and -e/--truststore cannot be combined")
+        logger.warning("Certificate validation for the management server "
+                       "is disabled (--insecure)")
+        return False
+    if truststore:
+        if not os.path.isfile(truststore):
+            raise Exception(
+                "Truststore file not found: {}".format(truststore))
+        return truststore
+    return True
 
 
 def get_x509_name_from_cli_args(common_name, args):
@@ -353,9 +391,16 @@ def generate_csr_and_private_key(common_name, private_key_filename, args):
     :rtype: str
     """
     x509_name = get_x509_name_from_cli_args(common_name, args)
+    key_type = getattr(args, "key_type", "rsa")
+    if key_type == "ec":
+        logger.warning(
+            "EC private key requested: DXL brokers up to 6.1.3 only accept "
+            "RSA client certificates (the management server signs the CSR, "
+            "but the broker rejects the TLS handshake). Use --key-type rsa "
+            "unless the broker is known to support ECDSA client certificates.")
     generator = CsrAndPrivateKeyGenerator(
         x509_name, args.san,
-        key_type=getattr(args, "key_type", "rsa"),
+        key_type=key_type,
         key_bits=getattr(args, "key_bits", 2048),
         curve=getattr(args, "key_curve", "secp256r1"))
     generator.save_csr_and_private_key(os.path.join(args.config_dir,
@@ -633,7 +678,7 @@ class ProvisionDxlClientSubcommand(Subcommand):  # pylint: disable=no-init
             os.path.join(args.config_dir, pk_filename), args)
 
         svc = ManagementService(args.host, args.port, args.user, args.password,
-                                verify=args.truststore)
+                                verify=_server_verify_from_cli_args(args))
         data_responses = svc.invoke_command(
             self._PROVISION_COMMAND,
             {"csrString": csr_as_string}).split(",")
@@ -837,7 +882,7 @@ class UpdateConfigSubcommand(Subcommand):  # pylint: disable=no-init
 
         dxlconfig = DxlClientConfig.create_dxl_config_from_file(config_file)
         svc = ManagementService(args.host, args.port, args.user, args.password,
-                                verify=args.truststore)
+                                verify=_server_verify_from_cli_args(args))
 
         self._update_broker_cert_chain(svc, dxlconfig.broker_ca_bundle)
         self._update_broker_config(svc, dxlconfig)

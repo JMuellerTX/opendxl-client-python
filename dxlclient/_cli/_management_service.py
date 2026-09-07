@@ -8,11 +8,31 @@
 from __future__ import absolute_import
 import json
 import logging
+import ssl
 import warnings
 import requests
+from requests.adapters import HTTPAdapter
 from requests.auth import HTTPBasicAuth
+from urllib3.util.ssl_ import create_urllib3_context
 
 logger = logging.getLogger(__name__)
+
+
+class _TruststoreAdapter(HTTPAdapter):
+    """
+    HTTPS adapter used when the caller supplies its own CA file. The CA file
+    is loaded by ``requests`` as usual; this adapter only relaxes
+    ``ssl.VERIFY_X509_STRICT``, which Python 3.13+ enables by default and which
+    rejects CA certificates that do not carry a key usage extension. Private
+    management server CAs (for example the ePO server CA) are such
+    certificates. The user explicitly named the CA to trust, so the RFC 5280
+    profile check adds nothing.
+    """
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context()
+        context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+        kwargs["ssl_context"] = context
+        return super().init_poolmanager(*args, **kwargs)
 
 
 class ManagementService(object):
@@ -43,6 +63,8 @@ class ManagementService(object):
         self._auth = HTTPBasicAuth(username, password)
         self._session = requests.Session()
         self._verify = verify
+        if isinstance(verify, str):
+            self._session.mount("https://", _TruststoreAdapter())
 
     def invoke_command(self, command_name, params=None):
         """
@@ -79,10 +101,39 @@ class ManagementService(object):
             warnings.filterwarnings("ignore", ".*subjectAltName.*")
             if not self._verify:
                 warnings.filterwarnings("ignore", "Unverified HTTPS request")
-            return self._session.get(_request_url,
-                                     auth=self._auth,
-                                     params=params,
-                                     verify=self._verify)
+            try:
+                return self._session.get(_request_url,
+                                         auth=self._auth,
+                                         params=params,
+                                         verify=self._verify)
+            except requests.exceptions.SSLError as ex:
+                raise Exception(self._tls_failure_message(ex)) from ex
+
+    def _tls_failure_message(self, error):
+        """
+        Build the error message for a failed TLS handshake with the
+        Management Service, including what the user can do about it.
+
+        :param Exception error: the error raised by `requests`
+        :return: the message
+        :rtype: str
+        """
+        message = ("TLS handshake with the management server {}:{} failed: "
+                   "{}.").format(self._host, self._port, error)
+        if self._verify is True:
+            message += (
+                " The server certificate is not trusted by the system's CAs."
+                " If the server uses a certificate from a private CA (for"
+                " example the ePO server CA), pass that CA's PEM file with"
+                " -e/--truststore. --insecure disables validation entirely.")
+        elif self._verify:
+            message += (
+                " The server certificate could not be validated against {}."
+                " Make sure the file contains the CA that issued the server"
+                " certificate and that the host name used matches the"
+                " certificate (an IP address usually does not).").format(
+                    self._verify)
+        return message
 
     @staticmethod
     def _parse_response(response, request_target):
