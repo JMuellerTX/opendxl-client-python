@@ -29,7 +29,7 @@ from dxlclient import Broker, DxlClient, DxlClientConfig, DxlException, \
 from dxlclient.callbacks import RequestCallback, ResponseCallback
 from dxlclient.service import _ServiceRegistrationHandler, \
     ServiceRegistrationInfo
-from dxlclient.test.base_test import BaseClientTest
+from dxlclient.test.base_test import BaseClientTest, test_config_path
 
 # pylint: disable=missing-docstring, protected-access
 
@@ -494,7 +494,7 @@ class ConnectFailureTest(BaseClientTest):
     def test_tls_min_version_is_applied_to_the_ssl_context(self):
         import ssl
         config = DxlClientConfig.create_dxl_config_from_file(
-            os.path.dirname(os.path.abspath(__file__)) + "/client_config.cfg")
+            test_config_path())
         config.connect_retries = 0
         with self.create_client_from_config(config) as client:
             context = client._client._ssl_context
@@ -516,7 +516,7 @@ class ConnectFailureTest(BaseClientTest):
     @attr('system')
     def test_failed_connect_does_not_start_mqtt_loop(self):
         config = DxlClientConfig.create_dxl_config_from_file(
-            os.path.dirname(os.path.abspath(__file__)) + "/client_config.cfg")
+            test_config_path())
         # ``config.brokers`` returns the WebSocket broker list when the
         # WebSocket transport is configured, so replace both lists.
         good_brokers = config.brokers
@@ -549,7 +549,7 @@ class ConnectFailureTest(BaseClientTest):
         ``_DEFAULT_CONNECT_WAIT`` (10 s) for it anyway before raising.
         """
         config = DxlClientConfig.create_dxl_config_from_file(
-            os.path.dirname(os.path.abspath(__file__)) + "/client_config.cfg")
+            test_config_path())
         bad_brokers = [Broker(host_name="127.0.0.1", unique_id="bad",
                               ip_address="127.0.0.1", port=1)]
         config.brokers = bad_brokers
@@ -583,7 +583,7 @@ class ConnectFailureTest(BaseClientTest):
         thread must run, and the first caller must fail normally.
         """
         config = DxlClientConfig.create_dxl_config_from_file(
-            os.path.dirname(os.path.abspath(__file__)) + "/client_config.cfg")
+            test_config_path())
         bad_brokers = [Broker(host_name="127.0.0.1", unique_id="bad",
                               ip_address="127.0.0.1", port=1)]
         config.brokers = bad_brokers
