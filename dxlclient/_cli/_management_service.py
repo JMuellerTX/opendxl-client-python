@@ -118,8 +118,14 @@ class ManagementService(object):
         :return: the message
         :rtype: str
         """
+        # requests wraps urllib3's MaxRetryError, whose text repeats the whole
+        # request URL (for provisionconfig: the URL-encoded CSR). Report the
+        # underlying TLS reason instead.
+        reason = error
+        if error.args and hasattr(error.args[0], "reason"):
+            reason = error.args[0].reason
         message = ("TLS handshake with the management server {}:{} failed: "
-                   "{}.").format(self._host, self._port, error)
+                   "{}.").format(self._host, self._port, reason)
         if self._verify is True:
             message += (
                 " The server certificate is not trusted by the system's CAs."
