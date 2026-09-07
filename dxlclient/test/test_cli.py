@@ -14,8 +14,6 @@ from __future__ import absolute_import
 from __future__ import print_function
 import base64
 import datetime
-from datetime import timedelta
-from datetime import tzinfo
 import getpass
 import json
 import os
@@ -32,12 +30,14 @@ else:
     from io import BytesIO as NativeStringIO
 
 # pylint: disable=wrong-import-position
-from asn1crypto import csr, pem, x509, algos
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.x509.oid import NameOID
 from mock import call, patch
 from parameterized import parameterized
 import requests
 import requests_mock
-from oscrypto import asymmetric
 
 from dxlclient import DxlUtils
 from dxlclient._cli import cli_run
@@ -68,111 +68,75 @@ class _TempDir(object):
             shutil.rmtree(self.dir)
 
 
+_SUBJECT_ATTRIBUTE_NAMES = {
+    NameOID.COMMON_NAME: u"common_name",
+    NameOID.COUNTRY_NAME: u"country_name",
+    NameOID.STATE_OR_PROVINCE_NAME: u"state_or_province_name",
+    NameOID.LOCALITY_NAME: u"locality_name",
+    NameOID.ORGANIZATION_NAME: u"organization_name",
+    NameOID.ORGANIZATIONAL_UNIT_NAME: u"organizational_unit_name",
+    NameOID.EMAIL_ADDRESS: u"email_address"
+}
+
+
 class _CertificateRequest(object):
     def __init__(self, csr_file):
-        csr_bytes = slurp_file_into_bytes(csr_file)
-        _, _, der_bytes = pem.unarmor(csr_bytes)
-        self.request = csr.CertificationRequest.load(der_bytes)
+        self.request = x509.load_pem_x509_csr(slurp_file_into_bytes(csr_file))
 
     @property
     def subject(self):
-        return self.request["certification_request_info"]["subject"].native
+        return {_SUBJECT_ATTRIBUTE_NAMES[attribute.oid]: attribute.value
+                for attribute in self.request.subject}
 
     @property
     def subject_alt_names(self):
-        names = None
-
-        attributes = self.request["certification_request_info"]["attributes"]
-        extension_request = next((attribute for attribute in attributes
-                                  if attribute["type"].native ==
-                                  "extension_request"), None)
-        if extension_request:
-            san_extension = None
-            for extensions in extension_request["values"]:
-                san_extension = next(
-                    (extension for extension in extensions
-                     if extension["extn_id"].native == "subject_alt_name"),
-                    None)
-                if san_extension:
-                    break
-
-            if san_extension:
-                names = [name.native
-                         for name in san_extension["extn_value"].parsed]
-        return names
+        try:
+            extension = self.request.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName)
+        except x509.ExtensionNotFound:
+            return None
+        return extension.value.get_values_for_type(x509.DNSName)
 
 
 class _PrivateKey(object):
     def __init__(self, private_key_file, password=None):
-        private_key_bytes = slurp_file_into_bytes(private_key_file)
-        self.private_key = asymmetric.load_private_key(private_key_bytes,
-                                                       password)
+        if password is not None and not isinstance(password, bytes):
+            password = password.encode()
+        # A missing password for an encrypted key is a TypeError in
+        # ``cryptography``, a wrong one a ValueError; both mean the same thing
+        # here, so the tests see a ValueError either way.
+        try:
+            self.private_key = serialization.load_pem_private_key(
+                slurp_file_into_bytes(private_key_file), password)
+        except TypeError as ex:
+            raise ValueError(str(ex))
 
     @property
     def algorithm(self):
-        return self.private_key.algorithm
+        return "ec" if isinstance(self.private_key,
+                                  ec.EllipticCurvePrivateKey) else "rsa"
 
 
-def get_fake_public_key_asn1():
-    fake_public_key, _ = asymmetric.generate_pair("rsa", 1024)
-    return fake_public_key.asn1
+# One key pair for every stand-in certificate and certificate request the
+# tests hand to the mocked management service
+_FAKE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_FAKE_SUBJECT = x509.Name(
+    [x509.NameAttribute(NameOID.COMMON_NAME, u"fake")])
 
+FAKE_CERTIFICATE = x509.CertificateBuilder() \
+    .subject_name(_FAKE_SUBJECT) \
+    .issuer_name(_FAKE_SUBJECT) \
+    .public_key(_FAKE_KEY.public_key()) \
+    .serial_number(1) \
+    .not_valid_before(datetime.datetime(2000, 1, 1)) \
+    .not_valid_after(datetime.datetime(2049, 12, 31)) \
+    .sign(_FAKE_KEY, hashes.SHA256()) \
+    .public_bytes(serialization.Encoding.PEM).decode("utf8")
 
-_SIGNATURE_ALGORITHM = algos.SignedDigestAlgorithm({
-    "algorithm": u"sha256_rsa"})
-_FAKE_SUBJECT = x509.Name.build({u"common_name": u"fake"})
-
-# for adding a timezone to datetime objects
-ZERO = timedelta(0)
-
-# A UTC class.
-class UTC(tzinfo):
-    """UTC"""
-
-    def utcoffset(self, _unused):
-        return ZERO
-
-    def tzname(self, _unused):
-        return "UTC"
-
-    def dst(self, _unused):
-        return ZERO
-
-UTC = UTC()
-
-FAKE_CERTIFICATE = \
-    pem.armor(u"CERTIFICATE",
-              x509.Certificate({
-                  "tbs_certificate": x509.TbsCertificate({
-                      "version": 1,
-                      "serial_number": 1,
-                      "signature": _SIGNATURE_ALGORITHM,
-                      "issuer": _FAKE_SUBJECT,
-                      "validity": {
-                          "not_before": x509.Time(
-                              name="utc_time",
-                              value=datetime.datetime(2000, 1, 1, 9, 47, 35, 249000, tzinfo=UTC)),
-                          "not_after": x509.Time(
-                              name="utc_time",
-                              value=datetime.datetime(2049, 12, 31, 9, 47, 35, 249000, tzinfo=UTC))},
-                      "subject": _FAKE_SUBJECT,
-                      "subject_public_key_info":
-                          get_fake_public_key_asn1()}),
-                  "signature_algorithm": algos.SignedDigestAlgorithm({
-                      "algorithm": u"sha256_rsa"}),
-                  "signature_value": b"fake"}).dump()).decode('utf8')
-
-FAKE_CSR = \
-    pem.armor(
-        u"CERTIFICATE REQUEST",
-        csr.CertificationRequest({
-            "certification_request_info":
-                csr.CertificationRequestInfo({
-                    "version": 1,
-                    "subject": _FAKE_SUBJECT,
-                    "subject_pk_info": get_fake_public_key_asn1()}),
-            "signature_algorithm": _SIGNATURE_ALGORITHM,
-            "signature": b"fake"}).dump()).decode('utf8')
+FAKE_CSR = x509.CertificateSigningRequestBuilder() \
+    .subject_name(_FAKE_SUBJECT) \
+    .sign(_FAKE_KEY, hashes.SHA256()) \
+    .public_bytes(serialization.Encoding.PEM).decode("utf8")
 
 
 class CliTest(unittest.TestCase):

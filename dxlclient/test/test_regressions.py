@@ -406,28 +406,32 @@ class CsrKeyOptionsTest(unittest.TestCase):
 
     @staticmethod
     def _load_csr(pem_text):
-        from asn1crypto import csr, pem
-        _, _, der = pem.unarmor(pem_text.encode() if isinstance(pem_text, str) else pem_text)
-        return csr.CertificationRequest.load(der)
+        from cryptography import x509
+        return x509.load_pem_x509_csr(
+            pem_text.encode() if isinstance(pem_text, str) else pem_text)
 
     def test_rsa_3072_request(self):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import rsa
         from dxlclient._cli._crypto import CsrAndPrivateKeyGenerator, X509Name
         generator = CsrAndPrivateKeyGenerator(X509Name("client"), key_bits=3072)
         request = self._load_csr(generator.csr)
-        info = request["certification_request_info"]
-        self.assertEqual("sha256_rsa", request["signature_algorithm"]["algorithm"].native)
-        self.assertEqual("rsa", info["subject_pk_info"]["algorithm"]["algorithm"].native)
-        self.assertEqual(3072, info["subject_pk_info"].bit_size)
+        self.assertTrue(request.is_signature_valid)
+        self.assertIsInstance(request.signature_hash_algorithm, hashes.SHA256)
+        self.assertIsInstance(request.public_key(), rsa.RSAPublicKey)
+        self.assertEqual(3072, request.public_key().key_size)
 
     def test_ec_request(self):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
         from dxlclient._cli._crypto import CsrAndPrivateKeyGenerator, X509Name
         generator = CsrAndPrivateKeyGenerator(X509Name("client"), key_type="ec",
                                               curve="secp384r1")
         request = self._load_csr(generator.csr)
-        info = request["certification_request_info"]
-        self.assertEqual("sha256_ecdsa", request["signature_algorithm"]["algorithm"].native)
-        self.assertEqual("ec", info["subject_pk_info"]["algorithm"]["algorithm"].native)
-        self.assertEqual("secp384r1", info["subject_pk_info"]["algorithm"]["parameters"].native)
+        self.assertTrue(request.is_signature_valid)
+        self.assertIsInstance(request.signature_hash_algorithm, hashes.SHA256)
+        self.assertIsInstance(request.public_key(), ec.EllipticCurvePublicKey)
+        self.assertEqual("secp384r1", request.public_key().curve.name)
 
     def test_invalid_key_options(self):
         from dxlclient._cli._crypto import CsrAndPrivateKeyGenerator, X509Name
