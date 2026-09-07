@@ -14,10 +14,37 @@ on:
 jobs:
   build:
 
+    # Two brokers, on purpose:
+    #
+    #   dockerhub - opendxl/opendxl-broker, last built in 2020: Debian stretch,
+    #               OpenSSL 1.0.2, TLS 1.2 and AES128-SHA256 only. This is what
+    #               people still run, so it stays the default axis.
+    #   ghcr      - the maintained fork's broker (OpenSSL 4, TLS 1.3, PFS
+    #               ciphers), published by the broker repository's own CI.
+    #
+    # The fork-broker TLS profiles (modern/legacy/pfsonly/trellix61) are
+    # exercised in the broker repository's workflow, which starts all four at
+    # once; here the point is only that the client still works against a current
+    # broker on every supported Python version.
+    #
+    # The GHCR axis is optional until the package has been made public by hand
+    # (packages published by a workflow start out private, and there is no API
+    # for the visibility): a private package cannot be pulled from this
+    # repository, and a red job for that reason would say nothing about the
+    # client. Drop `continue-on-error` once the pull works.
+    name: python ${{ matrix.python-version }} / ${{ matrix.broker.name }}
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.broker.optional }}
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        broker:
+          - name: dockerhub
+            image: opendxl/opendxl-broker
+            optional: false
+          - name: ghcr
+            image: ghcr.io/derjochenmueller/opendxl-broker:debian
+            optional: true
       fail-fast: false
 
     steps:
@@ -33,8 +60,8 @@ jobs:
 
     - name: Install broker
       run: |
-        docker pull opendxl/opendxl-broker
-        docker run -d -p 8883:8883 -p 8443:8443 -p 443:443 opendxl/opendxl-broker
+        docker pull ${{ matrix.broker.image }}
+        docker run -d -p 8883:8883 -p 8443:8443 -p 443:443 ${{ matrix.broker.image }}
         docker ps -a
 
     - name: Install dependencies
