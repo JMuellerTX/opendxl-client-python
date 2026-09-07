@@ -501,17 +501,36 @@ class ConnectFailureTest(BaseClientTest):
             self.assertEqual(ssl.TLSVersion.TLSv1_2, context.minimum_version)
             client.connect()
             self.assertTrue(client.connected)
+            negotiated = self._negotiated_tls_version(client)
             client.disconnect()
 
-        # A TLS 1.3 minimum cannot be negotiated with the open source broker
-        # (OpenSSL 1.0.2, TLS 1.2 only) -> connect() must fail cleanly
+        # Whether a TLS 1.3 minimum can be met depends on the broker: the
+        # upstream Docker Hub image (OpenSSL 1.0.2) stops at TLS 1.2, the
+        # broker fork's OpenSSL 4 image negotiates 1.3. Either way the floor
+        # must be applied: with 1.3 the client connects exactly when the
+        # broker offered 1.3 above, and fails cleanly otherwise.
         config.tls_min_version = "1.3"
         with self.create_client_from_config(config) as client:
             self.assertEqual(ssl.TLSVersion.TLSv1_3,
                              client._client._ssl_context.minimum_version)
-            with self.assertRaises(DxlException):
+            if negotiated == "TLSv1.3":
                 client.connect()
-            self.assertFalse(client.connected)
+                self.assertTrue(client.connected)
+                self.assertEqual("TLSv1.3",
+                                 self._negotiated_tls_version(client))
+                client.disconnect()
+            else:
+                with self.assertRaises(DxlException):
+                    client.connect()
+                self.assertFalse(client.connected)
+
+    @staticmethod
+    def _negotiated_tls_version(client):
+        """TLS version of the connected client's socket (e.g. ``TLSv1.3``)"""
+        sock = client._client._sock
+        # The WebSocket transport wraps the TLS socket
+        sock = getattr(sock, "_socket", sock)
+        return sock.version()
 
     @attr('system')
     def test_failed_connect_does_not_start_mqtt_loop(self):
