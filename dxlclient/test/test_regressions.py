@@ -17,6 +17,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 
 from nose.plugins.attrib import attr
@@ -55,6 +56,38 @@ class MessageWireFormatTest(unittest.TestCase):
         self.assertTrue(all(isinstance(b, str) for b in result.broker_ids))
         self.assertEqual({"key": "value"}, result.other_fields)
         self.assertIsInstance(list(result.other_fields.keys())[0], str)
+
+    def test_odd_other_fields_array_keeps_pairs_and_warns(self):
+        """
+        ``otherFields`` travels as a flat [key, value, key, value, ...]
+        array. A foreign client can send an odd number of entries; the
+        trailing key used to be dropped silently. The complete pairs must
+        survive and the drop must be visible in the log (G-3 in gemini.md).
+        """
+        import io
+        import logging
+        import msgpack
+        packer = msgpack.Packer(use_bin_type=False)
+        buf = io.BytesIO()
+        for obj in (1, Message.MESSAGE_TYPE_EVENT, "{id}", "{src}", "{brk}",
+                    [], [], b"payload", ["k1", "v1", "k2"]):
+            buf.write(packer.pack(obj))
+
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        message_logger = logging.getLogger("dxlclient.message")
+        message_logger.addHandler(handler)
+        try:
+            result = Message._from_bytes(buf.getvalue())
+        finally:
+            message_logger.removeHandler(handler)
+
+        self.assertEqual({"k1": "v1"}, result.other_fields)
+        self.assertEqual(b"payload", result.payload)
+        self.assertEqual(1, len(records))
+        self.assertEqual(logging.WARNING, records[0].levelno)
+        self.assertIn("k2", records[0].getMessage())
 
     def test_request_round_trip_preserves_service_id_as_str(self):
         request = Request(destination_topic="/test/service")
@@ -539,6 +572,82 @@ class ConnectFailureTest(BaseClientTest):
             self.assertFalse(client.connected)
             self.assertIsNone(client._client._thread)
             self.assertEqual([], waits)
+
+    def test_concurrent_connect_raises_instead_of_crashing(self):
+        """
+        Two threads calling ``connect()`` at the same time both passed the
+        "already connecting" check, both started a connect thread, and the
+        first one to finish cleared ``_thread`` while the other was still
+        polling it -> AttributeError on None (G-2 in gemini.md). The second
+        caller must get the documented DxlException, exactly one connect
+        thread must run, and the first caller must fail normally.
+        """
+        config = DxlClientConfig.create_dxl_config_from_file(
+            os.path.dirname(os.path.abspath(__file__)) + "/client_config.cfg")
+        bad_brokers = [Broker(host_name="127.0.0.1", unique_id="bad",
+                              ip_address="127.0.0.1", port=1)]
+        config.brokers = bad_brokers
+        config.websocket_brokers = bad_brokers
+        config.connect_retries = 0
+        config.reconnect_delay = 0.1
+
+        with self.create_client_from_config(config) as client:
+            inner = client  # the DxlClient itself; client._client is paho
+            loops = []
+            original_loop = inner._loop_until_connected
+
+            def counting_loop(connect_retries):
+                loops.append(threading.current_thread().name)
+                return original_loop(connect_retries)
+
+            inner._loop_until_connected = counting_loop
+
+            # Widen the race window: the first caller is held between the
+            # "already connecting" checks and the actual thread start.
+            entered = threading.Event()
+            release = threading.Event()
+            original_start = inner._start_connect_thread
+            starts = []
+
+            def slow_start(connect_retries=-1):
+                starts.append(threading.current_thread().name)
+                if len(starts) == 1:
+                    entered.set()
+                    release.wait(5)
+                return original_start(connect_retries=connect_retries)
+
+            inner._start_connect_thread = slow_start
+
+            outcomes = {}
+
+            def call_connect(name):
+                try:
+                    client.connect()
+                    outcomes[name] = "connected"
+                except DxlException as ex:
+                    outcomes[name] = str(ex)
+                except Exception as ex: # pylint: disable=broad-except
+                    outcomes[name] = "%s: %s" % (type(ex).__name__, ex)
+
+            first = threading.Thread(target=call_connect, args=("first",))
+            first.start()
+            self.assertTrue(entered.wait(5), "first connect did not start")
+            second = threading.Thread(target=call_connect, args=("second",))
+            second.start()
+            # Give the second caller time to run into the checks (it must
+            # block on the lock or raise; it must not start a thread).
+            time.sleep(0.5)
+            release.set()
+            first.join(10)
+            second.join(10)
+            self.assertFalse(first.is_alive() or second.is_alive())
+
+            self.assertEqual("Failed to establish connection", outcomes["first"])
+            self.assertEqual("Already trying to connect", outcomes["second"])
+            self.assertEqual(1, len(loops), "a second connect thread ran: %r" % outcomes)
+            self.assertEqual(1, len(starts))
+            self.assertIsNone(inner._thread)
+            self.assertFalse(client.connected)
 
     def create_client_from_config(self, config):
         from dxlclient.test.base_test import TestDxlClient

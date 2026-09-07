@@ -43,6 +43,7 @@ from __future__ import absolute_import
 from io import BytesIO
 from abc import ABCMeta, abstractmethod
 
+import logging
 import os
 os.environ['MSGPACK_PUREPYTHON'] = "1"
 # pylint: disable=wrong-import-position
@@ -51,6 +52,8 @@ import msgpack
 from dxlclient import _BaseObject
 from dxlclient._uuid_generator import UuidGenerator
 from dxlclient.exceptions import DxlException
+
+logger = logging.getLogger(__name__)
 from ._compat import iter_dict_items
 
 
@@ -297,11 +300,19 @@ class Message(ABCMeta('ABC', (_BaseObject,), {'__slots__': ()})): # compatible m
         key = None
         self._other_fields = {}
         for curr in array:
-            if key:
+            if key is not None:
                 self._other_fields[key] = curr.decode('utf8')
                 key = None
             else:
                 key = curr.decode('utf8')
+        if key is not None:
+            # A trailing key without a value: the array had an odd number
+            # of entries. It used to be dropped without a trace; the message
+            # is still usable, so keep the complete pairs and say so.
+            logger.warning(
+                "Message %s: 'otherFields' has an odd number of entries "
+                "(%d); ignoring trailing key %r without a value",
+                self._message_id, len(array), key)
 
     def _pack_message_v2(self, packer, buf):
         """

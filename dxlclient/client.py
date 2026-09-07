@@ -432,6 +432,10 @@ class DxlClient(_BaseObject):
         # Result of the last run of the connect thread (``DXL_ERR_*``)
         self._connect_result = None
 
+        # Serializes the "already connected / already connecting" checks in
+        # ``connect()`` with the start of the connect thread, so that two
+        # concurrent ``connect()`` calls cannot both start a thread.
+        self._connect_lock = threading.RLock()
         # The lock for the connect thread
         self._connect_wait_lock = threading.RLock()
         # The condition associated with the client configuration
@@ -500,20 +504,30 @@ class DxlClient(_BaseObject):
           of preventing multiple clients from having the same retry pattern
         - :attr:`dxlclient.client_config.DxlClientConfig.reconnect_delay_max` : The maximum delay between retry attempts
         """
-        if self.connected:
-            raise DxlException("Already connected")
+        # The checks and the thread start must be one atomic step: two
+        # concurrent connect() calls used to both pass the checks, both start
+        # a connect thread, and the one that finished first set ``_thread``
+        # to None under the feet of the other, which then died with an
+        # AttributeError instead of the documented DxlException.
+        with self._connect_lock:
+            if self.connected:
+                raise DxlException("Already connected")
 
-        if self._thread is not None:
-            raise DxlException("Already trying to connect")
+            if self._thread is not None:
+                raise DxlException("Already trying to connect")
 
-        # Start the connect thread
-        self._start_connect_thread(connect_retries=self.config.connect_retries)
+            # Start the connect thread
+            self._start_connect_thread(connect_retries=self.config.connect_retries)
+            connect_thread = self._thread
 
-        # Wait for the connect thread to finish
-        if self._thread is not None:
-            while self._thread.is_alive():
-                self._thread.join(1)
-            self._thread = None
+        # Wait for the connect thread to finish. Use the local reference:
+        # ``self._thread`` may be replaced or cleared by a disconnect or an
+        # automatic reconnect in the meantime.
+        while connect_thread.is_alive():
+            connect_thread.join(1)
+        with self._connect_lock:
+            if self._thread is connect_thread:
+                self._thread = None
 
         # Wait for the callback to be invoked. Only do so when the connect
         # thread actually started the MQTT network loop; otherwise no
