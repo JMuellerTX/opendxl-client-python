@@ -20,6 +20,7 @@ import getpass
 import json
 import os
 import shutil
+import ssl
 import sys
 import tempfile
 import unittest
@@ -34,11 +35,13 @@ else:
 from asn1crypto import csr, pem, x509, algos
 from mock import call, patch
 from parameterized import parameterized
+import requests
 import requests_mock
 from oscrypto import asymmetric
 
 from dxlclient import DxlUtils
 from dxlclient._cli import cli_run
+from dxlclient._cli._management_service import ManagementService
 
 from .base_test import builtins
 
@@ -400,6 +403,11 @@ class CliTest(unittest.TestCase):
             self.assertEqual(1, len(req_mock.request_history))
             request = req_mock.request_history[0]
 
+            # Without -e/--insecure the server certificate is validated
+            # against the system's trusted CAs (True, or the bundle named by
+            # REQUESTS_CA_BUNDLE/CURL_CA_BUNDLE in the environment)
+            self.assertTrue(request.verify)
+
             # Validate auth credentials sent in request
             expected_creds = "Basic {}".format(base64.b64encode(
                 b"myuser:mypass").decode("utf8"))
@@ -482,24 +490,104 @@ class CliTest(unittest.TestCase):
 
     def test_provisionconfig_with_trusted_ca_cert_and_port(self):
         with _TempDir("provconfig_ca_port") as temp_dir, \
+                requests_mock.mock(case_sensitive=True) as req_mock:
+            truststore_file = os.path.join(temp_dir, "mytruststore.pem")
+            DxlUtils.save_to_file(truststore_file, FAKE_CERTIFICATE)
+            req_mock.get(get_server_provision_url("myhost", 58443),
+                         text=get_mock_provision_response_func())
+
+            with patch("sys.argv", command_args(["provisionconfig",
+                                                 temp_dir,
+                                                 "myhost",
+                                                 "myclient",
+                                                 "-t", "58443",
+                                                 "-u", "myuser",
+                                                 "-p", "mypass",
+                                                 "-e", truststore_file])):
+                cli_run()
+
+            self.assertEqual(1, len(req_mock.request_history))
+            request = req_mock.request_history[0]
+
+            self.assertEqual(truststore_file, request.verify)
+
+    def test_provisionconfig_insecure_disables_validation(self):
+        with _TempDir("provconfig_insecure") as temp_dir, \
                 patch("sys.argv", command_args(["provisionconfig",
                                                 temp_dir,
                                                 "myhost",
                                                 "myclient",
-                                                "-t", "58443",
                                                 "-u", "myuser",
                                                 "-p", "mypass",
-                                                "-e", "mytruststore.pem"])), \
+                                                "--insecure"])), \
                 requests_mock.mock(case_sensitive=True) as req_mock:
-            req_mock.get(get_server_provision_url("myhost", 58443),
+            req_mock.get(get_server_provision_url("myhost"),
                          text=get_mock_provision_response_func())
 
             cli_run()
 
             self.assertEqual(1, len(req_mock.request_history))
-            request = req_mock.request_history[0]
+            self.assertIs(False, req_mock.request_history[0].verify)
 
-            self.assertEqual("mytruststore.pem", request.verify)
+    def test_provisionconfig_missing_truststore_file_fails(self):
+        with _TempDir("provconfig_no_truststore") as temp_dir, \
+                patch("sys.argv", command_args(["provisionconfig",
+                                                temp_dir,
+                                                "myhost",
+                                                "myclient",
+                                                "-u", "myuser",
+                                                "-p", "mypass",
+                                                "-e", os.path.join(
+                                                    temp_dir,
+                                                    "missing.pem")])), \
+                requests_mock.mock(case_sensitive=True) as req_mock, \
+                self.assertRaises(SystemExit) as context:
+            req_mock.get(get_server_provision_url("myhost"),
+                         text=get_mock_provision_response_func())
+            cli_run()
+
+        self.assertNotEqual(0, context.exception.code)
+        # Nothing was sent to the server
+        self.assertEqual(0, len(req_mock.request_history))
+
+    def test_provisionconfig_insecure_and_truststore_are_exclusive(self):
+        with _TempDir("provconfig_insecure_ts") as temp_dir, \
+                patch("sys.argv", command_args(["provisionconfig",
+                                                temp_dir,
+                                                "myhost",
+                                                "myclient",
+                                                "-u", "myuser",
+                                                "-p", "mypass",
+                                                "--insecure",
+                                                "-e", "any.pem"])), \
+                requests_mock.mock(case_sensitive=True) as req_mock, \
+                self.assertRaises(SystemExit) as context:
+            cli_run()
+
+        self.assertNotEqual(0, context.exception.code)
+        self.assertEqual(0, len(req_mock.request_history))
+
+    def test_provisionconfig_tls_failure_explains_truststore_option(self):
+        with _TempDir("provconfig_tls_failure") as temp_dir, \
+                patch("sys.argv", command_args(["provisionconfig",
+                                                temp_dir,
+                                                "myhost",
+                                                "myclient",
+                                                "-u", "myuser",
+                                                "-p", "mypass"])), \
+                requests_mock.mock(case_sensitive=True) as req_mock, \
+                patch("dxlclient._cli.logger.error") as mock_error, \
+                self.assertRaises(SystemExit):
+            req_mock.get(get_server_provision_url("myhost"),
+                         exc=requests.exceptions.SSLError(
+                             "certificate verify failed"))
+            cli_run()
+
+        self.assertEqual(1, mock_error.call_count)
+        message = str(mock_error.call_args[0][1])
+        self.assertIn("certificate verify failed", message)
+        self.assertIn("-e/--truststore", message)
+        self.assertIn("myhost:8443", message)
 
     def test_provisionconfig_with_prompt_for_server_user_and_password(self):
         responses = {"Enter server username:": "myuser",
@@ -583,12 +671,14 @@ class CliTest(unittest.TestCase):
 
             self.assertEqual(2, len(req_mock.request_history))
 
-            # Validate auth credentials sent in requests
+            # Validate auth credentials sent in requests and that the server
+            # certificate is validated against the system's trusted CAs
             expected_creds = "Basic {}".format(base64.b64encode(
                 b"myuser:mypass").decode("utf8"))
             for request in req_mock.request_history:
                 self.assertEqual(expected_creds,
                                  request.headers["Authorization"])
+                self.assertTrue(request.verify)
 
             # Validate updates to the ca bundle file
             self.assertTrue(os.path.exists(ca_bundle_file))
@@ -603,14 +693,10 @@ class CliTest(unittest.TestCase):
 
     def test_updateconfig_with_trusted_ca_cert_and_port(self):
         with _TempDir("updateconfig_ca_port") as temp_dir, \
-                patch("sys.argv", command_args(["updateconfig",
-                                                temp_dir,
-                                                "myhost",
-                                                "-t", "58443",
-                                                "-u", "myuser",
-                                                "-p", "mypass",
-                                                "-e", "mytruststore.pem"])), \
                 requests_mock.mock(case_sensitive=True) as req_mock:
+            truststore_file = os.path.join(temp_dir, "mytruststore.pem")
+            DxlUtils.save_to_file(truststore_file, FAKE_CERTIFICATE)
+
             ca_bundle_file = os.path.join(temp_dir, "ca-bundle.crt")
             DxlUtils.save_to_file(ca_bundle_file, "old ca")
 
@@ -624,13 +710,20 @@ class CliTest(unittest.TestCase):
             req_mock.get(broker_list_url,
                          text=get_mock_broker_list_response_func())
 
-            cli_run()
+            with patch("sys.argv", command_args(["updateconfig",
+                                                 temp_dir,
+                                                 "myhost",
+                                                 "-t", "58443",
+                                                 "-u", "myuser",
+                                                 "-p", "mypass",
+                                                 "-e", truststore_file])):
+                cli_run()
 
             self.assertEqual(2, len(req_mock.request_history))
 
             request_urls = []
             for request in req_mock.request_history:
-                self.assertEqual("mytruststore.pem", request.verify)
+                self.assertEqual(truststore_file, request.verify)
                 request_urls.append("{}://{}:{}{}".format(
                     request.scheme,
                     request.hostname,
@@ -680,6 +773,36 @@ class CliTest(unittest.TestCase):
                                  request.headers["Authorization"])
 
             self.assertEqual(2, mock_getpass.call_count)
+
+
+class ManagementServiceTest(unittest.TestCase):
+    """
+    Certificate validation set-up of the HTTPS session used for the
+    management server.
+    """
+    @staticmethod
+    def _https_ssl_context(service):
+        adapter = service._session.get_adapter("https://myhost:8443/remote")
+        return adapter.poolmanager.connection_pool_kw.get("ssl_context")
+
+    def test_truststore_file_relaxes_x509_strict_only(self):
+        svc = ManagementService("myhost", 8443, "u", "p",
+                                verify="mytruststore.pem")
+        context = self._https_ssl_context(svc)
+        self.assertIsNotNone(context)
+        # The CA file itself is loaded by requests; the adapter only drops
+        # the RFC 5280 profile check that rejects CAs without a key usage
+        # extension (Python >= 3.13 default). Everything else stays.
+        self.assertEqual(0, context.verify_flags & ssl.VERIFY_X509_STRICT)
+        self.assertEqual(ssl.CERT_REQUIRED, context.verify_mode)
+        self.assertTrue(context.check_hostname)
+        self.assertGreaterEqual(context.minimum_version,
+                                ssl.TLSVersion.TLSv1_2)
+
+    def test_system_cas_and_insecure_use_default_adapter(self):
+        for verify in (True, False):
+            svc = ManagementService("myhost", 8443, "u", "p", verify=verify)
+            self.assertIsNone(self._https_ssl_context(svc))
 
 
 def slurp_file_into_bytes(filename):

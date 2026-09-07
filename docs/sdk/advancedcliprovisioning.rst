@@ -87,15 +87,24 @@ The output of the command above should appear similar to the following::
     INFO: Saving ca bundle file to config/ca-bundle.crt
     INFO: Saving client certificate file to config/theclient.crt
 
-If the management server's CA certificate is stored in a local CA truststore
-file -- one or more PEM-formatted certificates concatenated together into a
-single file -- the provision operation can be configured to validate
-the management server's certificate against that truststore during TLS session
-negotiation by supplying the ``-e`` option.
+The management server's certificate is validated during TLS session
+negotiation. By default it is validated against the system's trusted CAs.
+Management servers commonly use a certificate issued by a private CA -- an
+ePO server, for example, issues its web certificate from its own server CA --
+which the system does not trust. Export that CA as a PEM file (one or more
+certificates concatenated) and supply it with the ``-e`` option::
 
-The name of the truststore file should be supplied along with the option::
+    dxlclient provisionconfig config myserver -e epo-ca.pem
 
-    dxlclient config myserver -e config/ca-bundle.crt
+The host name given on the command line must match the certificate; an IP
+address usually does not. Validation can be disabled with ``--insecure``, which
+is not recommended because it leaves the transport of the credentials and of the
+returned certificates unprotected against interception.
+
+Python 3.13 and later reject CA certificates that lack a key usage extension
+(``VERIFY_X509_STRICT``). Since the CA supplied with ``-e`` is trusted
+explicitly, this check is not applied to it; it remains in effect for the
+system's trusted CAs.
 
 Generating the CSR Separately from Signing the Certificate
 **********************************************************
