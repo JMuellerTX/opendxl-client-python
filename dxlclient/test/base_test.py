@@ -9,6 +9,27 @@ from dxlclient import DxlClientConfig, DxlClient
 
 # pylint: disable=missing-docstring, no-self-use
 
+TEST_CONFIG_ENV = "DXL_TEST_CONFIG"
+"""
+Environment variable naming the client configuration file the broker-based
+tests use. Without it the tests read ``client_config.cfg`` next to this
+module. Point it at a configuration provisioned against another broker (for
+example one of the TLS profiles in the broker fork's docker-compose.test.yml)
+to run the same suite against that broker.
+"""
+
+
+def test_config_path():
+    """
+    :return: path of the client configuration file for the broker-based tests
+    :rtype: str
+    """
+    from_env = os.environ.get(TEST_CONFIG_ENV)
+    if from_env:
+        return os.path.abspath(from_env)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "client_config.cfg")
+
 
 def atomize(lock):
     def decorator(wrapped):
@@ -45,8 +66,7 @@ class BaseClientTest(TestCase):
     REG_DELAY = 60
 
     def create_client(self, max_retries=DEFAULT_RETRIES, incoming_message_thread_pool_size=1):
-        config = DxlClientConfig.create_dxl_config_from_file(os.path.dirname(os.path.abspath(__file__)) +
-                                                             "/client_config.cfg")
+        config = DxlClientConfig.create_dxl_config_from_file(test_config_path())
         config.incoming_message_thread_pool_size = incoming_message_thread_pool_size
 
         config.connect_retries = max_retries
