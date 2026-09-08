@@ -17,6 +17,14 @@ import sys
 # Patch setuptools' sdist behaviour with distutils' sdist behaviour
 setuptools.command.sdist.sdist.run = distutils.command.sdist.sdist.run
 
+# The name pip records for the distribution. The import package is always ``dxlclient``;
+# only this changes. The default keeps the upstream name, which is what makes an install of
+# this fork satisfy the plain ``dxlclient`` dependency the downstream OpenDXL projects declare
+# (and thereby keeps them off the ``msgpack<1.0.0`` pin of the published package). The upstream
+# name on PyPI belongs to the upstream project, so a release of our own is built under a name
+# of our own: ``DXLCLIENT_DIST_NAME=opendxlclient python -m build``.
+DIST_NAME = os.environ.get("DXLCLIENT_DIST_NAME", "dxlclient")
+
 PRODUCT_PROPS = {}
 CWD = os.path.abspath(os.path.dirname(__file__))
 with open(os.path.join(CWD, "dxlclient", "_product_props.py")) as f:
@@ -78,7 +86,7 @@ DEV_REQUIREMENTS = TEST_REQUIREMENTS + ["sphinx"]
 
 setup(
     # Application name:
-    name="dxlclient",
+    name=DIST_NAME,
 
     # Version number:
     version=PRODUCT_PROPS["__version__"],
