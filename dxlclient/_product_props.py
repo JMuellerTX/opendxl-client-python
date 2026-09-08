@@ -5,7 +5,13 @@
 
 """ Product properties, used for packaging. """
 
-__version__ = "5.7.0.1"
+# The upstream release this fork is based on, plus a PEP 440 local version identifier.
+# Without the suffix the fork is indistinguishable from the PyPI build of the same version:
+# `pip list` shows the same string for both, and `pip install -U dxlclient` silently replaces
+# a git-installed fork with the published package. The local segment satisfies every
+# `dxlclient` requirement a downstream package declares (and cannot be uploaded to PyPI,
+# which is correct - the name belongs to the upstream project).
+__version__ = "5.7.0.1+fork.1"
 
 __product_id__ = "DXL_____1000"
 
