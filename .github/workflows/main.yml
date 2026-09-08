@@ -40,7 +40,7 @@ jobs:
           - name: dockerhub
             image: opendxl/opendxl-broker
           - name: ghcr
-            image: ghcr.io/derjochenmueller/opendxl-broker:debian
+            image: ghcr.io/jmuellertx/opendxl-broker:debian
       fail-fast: false
 
     steps:
