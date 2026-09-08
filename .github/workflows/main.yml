@@ -27,24 +27,20 @@ jobs:
     # once; here the point is only that the client still works against a current
     # broker on every supported Python version.
     #
-    # The GHCR axis is optional until the package has been made public by hand
-    # (packages published by a workflow start out private, and there is no API
-    # for the visibility): a private package cannot be pulled from this
-    # repository, and a red job for that reason would say nothing about the
-    # client. Drop `continue-on-error` once the pull works.
+    # Both axes are mandatory. The GHCR package was private when this matrix was
+    # added (a package published by a workflow starts out private, and there is
+    # no API to change that); it has been public since 2026-09-08 and the pull
+    # works anonymously, so a red GHCR job now says something about the client.
     name: python ${{ matrix.python-version }} / ${{ matrix.broker.name }}
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.broker.optional }}
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         broker:
           - name: dockerhub
             image: opendxl/opendxl-broker
-            optional: false
           - name: ghcr
             image: ghcr.io/derjochenmueller/opendxl-broker:debian
-            optional: true
       fail-fast: false
 
     steps:
