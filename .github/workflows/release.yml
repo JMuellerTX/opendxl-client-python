@@ -1,0 +1,121 @@
+name: Release
+
+# Cuts a GitHub release from a tag. There is deliberately no PyPI step: the name
+# `dxlclient` on PyPI belongs to the upstream project, and a fork that occupied a
+# namespace it does not own would be the very supply-chain problem this fork documents.
+# A public release under a name of our own is prepared but not enabled - see
+# "Publishing under our own name" below.
+#
+#   git tag -a v5.7.0.1+fork.1 -m "..." && git push fork v5.7.0.1+fork.1
+#
+# The tag drives nothing but the release page: the version comes from
+# dxlclient/_product_props.py, and the job fails if the two disagree.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build the release from"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.tag || github.ref }}
+        # pahoproxy is built from the paho_mqtt_dxl submodule
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Build the wheel and the sdist
+      run: |
+        python -m pip install --upgrade pip build
+        python -m build
+        ls -l dist
+
+    - name: Check the tag against the package version
+      run: |
+        set -eu
+        tag="${{ github.event.inputs.tag || github.ref_name }}"
+        version="$(python -c 'import runpy; print(runpy.run_path("dxlclient/_product_props.py")["__version__"])')"
+        echo "tag=$tag version=$version"
+        # A local version identifier is written 5.7.0.1+fork.1 but normalises to
+        # 5.7.0.1+fork.1 in the file name; compare against the tag without the leading v.
+        [ "${tag#v}" = "$version" ]
+
+    - name: Install the wheel and import the package
+      run: |
+        set -eu
+        python -m venv /tmp/smoke
+        /tmp/smoke/bin/pip install --quiet dist/*.whl
+        /tmp/smoke/bin/python -c "import dxlclient, pahoproxy; print(dxlclient.__version__)"
+        /tmp/smoke/bin/python -m dxlclient --help > /dev/null
+        # The fork must not drag the unmaintained pair back in
+        ! /tmp/smoke/bin/pip show oscrypto asn1crypto 2>/dev/null | grep -q Name || (echo "oscrypto/asn1crypto installed" && exit 1)
+
+    - name: Checksums
+      run: |
+        cd dist
+        sha256sum * > SHA256SUMS
+        cat SHA256SUMS
+
+    - name: Release notes
+      run: |
+        set -eu
+        tag="${{ github.event.inputs.tag || github.ref_name }}"
+        wheel="$(cd dist && ls *.whl)"
+        {
+          echo "Built from \`$tag\` by \`.github/workflows/release.yml\`; \`SHA256SUMS\` covers the files below."
+          echo
+          echo "**This is the maintained fork, not the upstream package.** It is not on PyPI: the"
+          echo "name \`dxlclient\` there belongs to the upstream project. Install from this release"
+          echo
+          echo "    pip install https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$wheel"
+          echo
+          echo "or from git"
+          echo
+          echo "    pip install \"git+https://github.com/$GITHUB_REPOSITORY@$tag\""
+          echo
+          echo "The distribution is named \`dxlclient\` and versioned \`x.y.z+fork.n\`: it satisfies the"
+          echo "plain \`dxlclient\` dependency the downstream OpenDXL projects declare - which is what"
+          echo "keeps them off the \`msgpack<1.0.0\` pin of the published package - while staying"
+          echo "distinguishable from it in \`pip list\`."
+        } > notes.md
+        cat notes.md
+
+    - name: Publish the release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -eu
+        tag="${{ github.event.inputs.tag || github.ref_name }}"
+        if gh release view "$tag" >/dev/null 2>&1; then
+          gh release upload "$tag" dist/* --clobber
+        else
+          gh release create "$tag" dist/* --title "$tag" --notes-file notes.md
+        fi
+
+# Publishing under our own name (prepared, not enabled)
+#
+# setup.py takes the distribution name from DXLCLIENT_DIST_NAME (default `dxlclient`), so a
+# public release only needs `DXLCLIENT_DIST_NAME=opendxlclient python -m build` plus a
+# pypa/gh-action-pypi-publish step with a trusted publisher configured for the project. It is
+# deliberately not wired up: the name is only worth claiming once it is settled whether these
+# projects keep the opendxl.com identity (see docs/security.md, "Package names are a security
+# boundary"). Note the trade-off - a differently named distribution no longer satisfies the
+# downstream `dxlclient` requirement, so it helps discovery, not the transitive msgpack pin.
