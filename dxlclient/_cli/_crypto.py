@@ -402,10 +402,14 @@ class CsrAndPrivateKeyGenerator(object):
     @property
     def csr(self):
         """
-        Return the certificate request as PEM-encoded string
+        Return the certificate request as PEM-encoded bytes.
+
+        Bytes, not str: the move from oscrypto to cryptography made this
+        ``public_bytes(...)``, and the docstring kept saying str. The stray
+        zero-width space in front of the old ``:rtype:`` went with it.
 
         :return: the PEM-encoded certificate request
-        ​:rtype: str
+        :rtype: bytes
         """
         return self._csr.dump_to_pem()
 

@@ -673,12 +673,21 @@ class ProvisionDxlClientSubcommand(Subcommand):  # pylint: disable=no-init
         # were not specified on the command line.
         _prompt_server_args(args)
 
+        # Resolve the server arguments first. This raises for --insecure
+        # together with -e, and for a truststore file that does not exist -
+        # pure argument errors, but they used to surface only after the
+        # private key had been written. Since the key is saved with O_TRUNC,
+        # a typo in -e therefore replaced a working client.key with one whose
+        # CSR was never signed, and the certificate next to it stopped
+        # matching: a fabric identity lost to a mistyped path.
+        server_verify = _server_verify_from_cli_args(args)
+
         pk_filename = _private_key_filename(args.file_prefix)
         csr_as_string = self._process_csr_and_private_key(
             os.path.join(args.config_dir, pk_filename), args)
 
         svc = ManagementService(args.host, args.port, args.user, args.password,
-                                verify=_server_verify_from_cli_args(args))
+                                verify=server_verify)
         data_responses = svc.invoke_command(
             self._PROVISION_COMMAND,
             {"csrString": csr_as_string}).split(",")

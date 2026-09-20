@@ -119,7 +119,9 @@ setup(
         # CLI used for key and certificate request generation
         "cryptography>=3.1",
         "configobj",
-        "msgpack>=0.5",
+        # 0.5.2 is the first release with the ``raw`` keyword that
+        # message.py passes to msgpack.Unpacker.
+        "msgpack>=0.5.2",
         "requests",
         "PySocks"
     ],
