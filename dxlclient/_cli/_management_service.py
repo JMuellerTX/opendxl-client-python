@@ -28,11 +28,23 @@ class _TruststoreAdapter(HTTPAdapter):
     certificates. The user explicitly named the CA to trust, so the RFC 5280
     profile check adds nothing.
     """
-    def init_poolmanager(self, *args, **kwargs):
+    @staticmethod
+    def _relaxed_context():
         context = create_urllib3_context()
         context.verify_flags &= ~ssl.VERIFY_X509_STRICT
-        kwargs["ssl_context"] = context
+        return context
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = self._relaxed_context()
         return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, *args, **kwargs):
+        # requests builds the proxy manager from its own pool arguments and
+        # never passes the context set above, so behind HTTPS_PROXY the
+        # relaxation silently did not apply and provisioning against a CA
+        # without a key usage extension still failed on Python 3.13+.
+        kwargs["ssl_context"] = self._relaxed_context()
+        return super().proxy_manager_for(*args, **kwargs)
 
 
 class ManagementService(object):

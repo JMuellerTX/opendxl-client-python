@@ -19,8 +19,11 @@ to run the same suite against that broker.
 """
 
 
-def test_config_path():
+def client_config_path():
     """
+    Not named ``test_*``: pytest collects anything that is, and then warns
+    that the "test" returned a value instead of asserting.
+
     :return: path of the client configuration file for the broker-based tests
     :rtype: str
     """
@@ -66,7 +69,7 @@ class BaseClientTest(TestCase):
     REG_DELAY = 60
 
     def create_client(self, max_retries=DEFAULT_RETRIES, incoming_message_thread_pool_size=1):
-        config = DxlClientConfig.create_dxl_config_from_file(test_config_path())
+        config = DxlClientConfig.create_dxl_config_from_file(client_config_path())
         config.incoming_message_thread_pool_size = incoming_message_thread_pool_size
 
         config.connect_retries = max_retries

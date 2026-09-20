@@ -79,6 +79,19 @@ jobs:
         pip install wheel
         pip install .[test]
 
+    # `setup.py ci` ran pylint before the switch to pytest, and nothing replaced
+    # it - lint regressions landed silently for as long as that was true.
+    #
+    # --errors-only on purpose. The full run scores 9.64/10 on a backlog that is
+    # all style and Python-2-era distutils imports; gating on it would fail the
+    # build today and teach everyone to ignore the step. The error class is what
+    # actually breaks - undefined names, wrong arity, bad imports - and it passes,
+    # so this is a gate that holds rather than one that is switched off.
+    - name: Lint (errors only)
+      run: |
+        pylint --errors-only dxlclient *.py
+        pylint --errors-only examples/*.py examples/**/*.py --rcfile .pylintrc.examples
+
     - name: Execute CI
       run: |
         # The CLI validates the management server's certificate by default; the

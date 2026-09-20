@@ -675,15 +675,28 @@ class DxlClient(_BaseObject):
         self._client.disconnect()
         logger.debug("Disconnected.")
 
-        # Make sure the connection loop is done
-        if self._thread is not None:
+        # Make sure the connection loop is done.
+        #
+        # Read ``self._thread`` once, under the lock, and work with that
+        # reference afterwards. Testing the attribute and then calling
+        # ``self._thread.is_alive()`` on it are two steps, and a connect()
+        # finishing in between sets the attribute to None - which used to
+        # end here in "AttributeError: 'NoneType' object has no attribute
+        # 'is_alive'". That is the same failure the connect() side was
+        # fixed for; it simply survived on this side.
+        with self._connect_lock:
+            connect_thread = self._thread
+            if connect_thread is not None:
+                self._thread_terminate = True
+        if connect_thread is not None:
             logger.debug("Waiting for the thread to terminate...")
-            self._thread_terminate = True
             with self._connect_wait_lock:
                 self._connect_wait_condition.notify_all()
-            while self._thread.is_alive():
-                self._thread.join(1)
-            self._thread = None
+            while connect_thread.is_alive():
+                connect_thread.join(1)
+            with self._connect_lock:
+                if self._thread is connect_thread:
+                    self._thread = None
             logger.debug("Thread terminated.")
 
         # Wait for the callback to be invoked
