@@ -55,9 +55,22 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install broker
+      # The two images differ in one thing that matters here: the fork's console
+      # has no default password (it generates one per volume on first start),
+      # while the 2021 Docker Hub image is fixed at admin/password and ignores
+      # DXL_CONSOLE_PASSWORD. Supplying a password covers both - the old image
+      # drops the variable on the floor, so it only has to be "password" there.
       run: |
+        if [ "${{ matrix.broker.name }}" = "dockerhub" ]; then
+          pw=password
+        else
+          pw=$(openssl rand -hex 16)
+          echo "::add-mask::$pw"
+        fi
+        echo "BROKER_PASSWORD=$pw" >> "$GITHUB_ENV"
         docker pull ${{ matrix.broker.image }}
-        docker run -d -p 8883:8883 -p 8443:8443 -p 443:443 ${{ matrix.broker.image }}
+        docker run -d -p 8883:8883 -p 8443:8443 -p 443:443 \
+          -e DXL_CONSOLE_PASSWORD="$pw" ${{ matrix.broker.image }}
         docker ps -a
 
     - name: Install dependencies
@@ -70,7 +83,7 @@ jobs:
       run: |
         # The CLI validates the management server's certificate by default; the
         # throwaway broker container uses a self-signed one, so skip validation here.
-        python -m dxlclient provisionconfig dxlclient/test 127.0.0.1 client -u admin -p password --insecure
+        python -m dxlclient provisionconfig dxlclient/test 127.0.0.1 client -u admin -p "$BROKER_PASSWORD" --insecure
         cp dxlclient/test/dxlclient.config dxlclient/test/client_config.cfg
         sed -i -e "s/127.0.0.1;127.0.0.1/127.0.0.1/g" -e "/local/d" -e "/docker/d" dxlclient/test/client_config.cfg
         # The open source broker only offers AES128-SHA256 for MQTT
