@@ -430,7 +430,7 @@ class DxlClient(_BaseObject):
         # The loop thread terminate flag
         self._thread_terminate = False
         # Result of the last run of the connect thread (``DXL_ERR_*``)
-        self._connect_result = None
+        self._connect_result_box = None
 
         # Serializes the "already connected / already connecting" checks in
         # ``connect()`` with the start of the connect thread, so that two
@@ -517,8 +517,8 @@ class DxlClient(_BaseObject):
                 raise DxlException("Already trying to connect")
 
             # Start the connect thread
-            self._start_connect_thread(connect_retries=self.config.connect_retries)
-            connect_thread = self._thread
+            connect_thread, result_box = self._start_connect_thread(
+                connect_retries=self.config.connect_retries)
 
         # Wait for the connect thread to finish. Use the local reference:
         # ``self._thread`` may be replaced or cleared by a disconnect or an
@@ -533,7 +533,7 @@ class DxlClient(_BaseObject):
         # thread actually started the MQTT network loop; otherwise no
         # callback is pending and the wait would merely delay the exception
         # by ``_DEFAULT_CONNECT_WAIT`` seconds.
-        if self._connect_result == DXL_ERR_SUCCESS:
+        if result_box["result"] == DXL_ERR_SUCCESS:
             with self._connected_lock:
                 if not self.connected:
                     self._connected_wait_condition.wait(self._DEFAULT_CONNECT_WAIT)
@@ -571,10 +571,36 @@ class DxlClient(_BaseObject):
         return getattr(ssl, "PROTOCOL_TLS_CLIENT", ssl.PROTOCOL_SSLv23)
 
     def _start_connect_thread(self, connect_retries=-1):
-        self._connect_result = None
-        self._thread = threading.Thread(target=self._connect_thread_main, args=[connect_retries])
-        self._thread.daemon = True
-        self._thread.start()
+        """
+        Start a connect thread and return it together with the box that will
+        hold its result.
+
+        The lock is taken **here** rather than at a call site. This is the third
+        round of the same defect: Gemini reported the unlocked check in
+        ``connect()`` (G-2), that one call site was fixed, then ``_disconnect()``
+        turned out to read the same field unlocked, and now the automatic
+        reconnect in ``_on_disconnect_run`` - the other caller of this method -
+        was still starting a second, untracked thread while ``connect()`` held
+        the lock. Guarding the field instead of the caller ends the series.
+
+        ``_thread_terminate`` is cleared here, under the lock, and no longer in
+        the thread body: a thread starting late used to reset a terminate
+        request that ``_disconnect()`` had just made.
+
+        The result goes into a per-attempt box rather than one shared
+        attribute, so a reconnect starting in the meantime cannot blank the
+        result the caller is waiting for.
+        """
+        with self._connect_lock:
+            result_box = {"result": None}
+            self._connect_result_box = result_box
+            self._thread_terminate = False
+            thread = threading.Thread(target=self._connect_thread_main,
+                                      args=[connect_retries, result_box])
+            thread.daemon = True
+            self._thread = thread
+            thread.start()
+            return thread, result_box
 
     def destroy(self):
         """
@@ -632,6 +658,12 @@ class DxlClient(_BaseObject):
         else:
             logger.warning("Trying to disconnect a disconnected client.")
             self._stop_mqtt_loop()
+            # An automatic reconnect started by _on_disconnect_run runs with
+            # connect_retries=-1, so it outlives a disconnect() that only stops
+            # the network loop. destroy() then sets _config and _client to None
+            # underneath it and the thread dies on stderr with an AttributeError,
+            # or restarts the loop that was just stopped.
+            self._terminate_connect_thread()
 
     def _stop_mqtt_loop(self):
         """
@@ -675,29 +707,8 @@ class DxlClient(_BaseObject):
         self._client.disconnect()
         logger.debug("Disconnected.")
 
-        # Make sure the connection loop is done.
-        #
-        # Read ``self._thread`` once, under the lock, and work with that
-        # reference afterwards. Testing the attribute and then calling
-        # ``self._thread.is_alive()`` on it are two steps, and a connect()
-        # finishing in between sets the attribute to None - which used to
-        # end here in "AttributeError: 'NoneType' object has no attribute
-        # 'is_alive'". That is the same failure the connect() side was
-        # fixed for; it simply survived on this side.
-        with self._connect_lock:
-            connect_thread = self._thread
-            if connect_thread is not None:
-                self._thread_terminate = True
-        if connect_thread is not None:
-            logger.debug("Waiting for the thread to terminate...")
-            with self._connect_wait_lock:
-                self._connect_wait_condition.notify_all()
-            while connect_thread.is_alive():
-                connect_thread.join(1)
-            with self._connect_lock:
-                if self._thread is connect_thread:
-                    self._thread = None
-            logger.debug("Thread terminated.")
+        # Make sure the connection loop is done
+        self._terminate_connect_thread()
 
         # Wait for the callback to be invoked
         with self._connected_lock:
@@ -708,12 +719,35 @@ class DxlClient(_BaseObject):
         if self.connected:
             raise DxlException("Failed to disconnect")
 
-    def _connect_thread_main(self, connect_retries):
+    def _terminate_connect_thread(self):
+        """
+        Ask the connect thread to stop and wait for it. Safe when none runs.
+
+        Read ``self._thread`` once, under the lock, and work with that
+        reference afterwards: testing the attribute and then calling
+        ``is_alive()`` on it are two steps, and a ``connect()`` finishing in
+        between sets the attribute to None.
+        """
+        with self._connect_lock:
+            connect_thread = self._thread
+            if connect_thread is None:
+                return
+            self._thread_terminate = True
+        logger.debug("Waiting for the thread to terminate...")
+        with self._connect_wait_lock:
+            self._connect_wait_condition.notify_all()
+        while connect_thread.is_alive():
+            connect_thread.join(1)
+        with self._connect_lock:
+            if self._thread is connect_thread:
+                self._thread = None
+        logger.debug("Thread terminated.")
+
+    def _connect_thread_main(self, connect_retries, result_box):
         """
         The connection thread main function
         """
-        self._thread_terminate = False
-        self._connect_result = self._loop_until_connected(connect_retries)
+        result_box["result"] = self._loop_until_connected(connect_retries)
 
     def _connect(self, brokers): # pylint: disable=too-many-branches
         """

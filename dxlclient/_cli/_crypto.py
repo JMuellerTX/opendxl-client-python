@@ -279,10 +279,20 @@ class _KeyPair(object):
             passphrase = passphrase if isinstance(passphrase, bytes) \
                 else passphrase.encode()
             # PBES2 with AES-256-CBC and PBKDF2-HMAC-SHA256. The KDF
-            # parameters are the ones the library picks; unlike for
-            # PKCS#12, cryptography does not expose an encryption builder
-            # for PKCS#8, so the iteration count is OpenSSL's default of
-            # 2048 (the previous implementation used 25000).
+            # parameters are the ones the library picks: OpenSSL's default of
+            # 2048 iterations, where the previous oscrypto implementation used
+            # 25000. That is a real weakening of an encrypted client.key and
+            # there is no way around it in the public API.
+            #
+            # Two reviews have now proposed
+            #   PrivateFormat.PKCS8.encryption_builder().kdf_rounds(...)
+            # on the grounds that the attribute exists. It does - and calling
+            # it raises, verified on cryptography 50.0.1:
+            #   ValueError: encryption_builder only supported with
+            #               PrivateFormat.OpenSSH and PrivateFormat.PKCS12
+            # Switching to PKCS#12 would change the on-disk format of a file
+            # every DXL client reads as PEM. Left as is, deliberately; revisit
+            # when cryptography supports a builder for PKCS#8.
             encryption = serialization.BestAvailableEncryption(passphrase)
         return self._private_key.private_bytes(
             encoding=serialization.Encoding.PEM,

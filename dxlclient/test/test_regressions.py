@@ -21,7 +21,7 @@ import time
 import unittest
 
 from nose.plugins.attrib import attr
-from mock import MagicMock
+from mock import MagicMock, patch
 
 from dxlclient import Broker, DxlClient, DxlClientConfig, DxlException, \
     DxlUtils, ErrorResponse, Event, Message, Request, RequestManager, \
@@ -537,6 +537,79 @@ class ConnectFailureTest(BaseClientTest):
         return sock.version()
 
     @attr('system')
+    def test_reconnect_path_starts_its_thread_under_the_lock(self):
+        """
+        The automatic reconnect must not start a second, untracked connect
+        thread while connect() holds the lock.
+
+        Third round of the same defect: Gemini reported the unlocked check in
+        connect() (G-2), that call site was fixed, then _disconnect() turned
+        out to read the same field unlocked, and then _on_disconnect_run - the
+        other caller of _start_connect_thread - was still unguarded. This pins
+        the invariant at the field rather than at a call site: whoever starts a
+        connect thread holds _connect_lock while doing it.
+        """
+        config = DxlClientConfig.create_dxl_config_from_file(
+            client_config_path())
+        config.connect_retries = 0
+
+        with self.create_client_from_config(config) as client:
+            held = []
+
+            real_thread = threading.Thread
+
+            def recording_thread(*args, **kwargs):
+                # Only the connect thread: paho starts its own network loop
+                # thread through the same module, and that one has no business
+                # holding this lock.
+                if kwargs.get("target") == client._connect_thread_main:
+                    # _connect_lock is an RLock, so acquire(blocking=False) from
+                    # the same thread succeeds whether or not it is held - ask
+                    # the lock object itself instead.
+                    held.append(client._connect_lock._is_owned())
+                return real_thread(*args, **kwargs)
+
+            with patch("dxlclient.client.threading.Thread", recording_thread):
+                thread, box = client._start_connect_thread(connect_retries=0)
+                thread.join(10)
+
+            self.assertEqual([True], held,
+                             "the connect thread was started without the lock")
+            # The result belongs to this attempt rather than to a shared
+            # attribute, so a reconnect starting in the meantime cannot blank
+            # the value the caller is waiting for.
+            self.assertIn("result", box)
+            second, second_box = client._start_connect_thread(connect_retries=0)
+            second.join(10)
+            self.assertIsNot(box, second_box)
+
+    def test_disconnect_terminates_a_running_reconnect_thread(self):
+        """
+        disconnect() on a client that is not connected has to stop an automatic
+        reconnect, not only the network loop. Otherwise destroy() sets _config
+        and _client to None underneath a thread that is still running with
+        connect_retries=-1.
+        """
+        config = DxlClientConfig.create_dxl_config_from_file(
+            client_config_path())
+        good_brokers = config.brokers
+        bad = [Broker(host_name=good_brokers[0].host_name, port=1)]
+        config.brokers = bad
+        config.websocket_brokers = bad
+        config.connect_retries = -1
+        config.reconnect_delay = 0.1
+
+        with self.create_client_from_config(config) as client:
+            thread, _ = client._start_connect_thread(connect_retries=-1)
+            self.assertTrue(thread.is_alive())
+
+            client.disconnect()
+
+            thread.join(15)
+            self.assertFalse(thread.is_alive(),
+                             "disconnect() left the reconnect thread running")
+            self.assertIsNone(client._thread)
+
     def test_failed_connect_does_not_start_mqtt_loop(self):
         config = DxlClientConfig.create_dxl_config_from_file(
             client_config_path())
