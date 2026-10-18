@@ -116,6 +116,12 @@ class Message(ABCMeta('ABC', (_BaseObject,), {'__slots__': ()})): # compatible m
         # The set of tenant GUIDs to deliver the message to
         self._destination_tenant_guids = []
 
+        ###########
+        # Version 3
+        ###########
+        # The identifier for the client instance that is the source of the message
+        self._source_client_instance_id = ""
+
     @property
     def version(self):
         """
@@ -314,6 +320,20 @@ class Message(ABCMeta('ABC', (_BaseObject,), {'__slots__': ()})): # compatible m
                 "(%d); ignoring trailing key %r without a value",
                 self._message_id, len(array), key)
 
+    @property
+    def source_client_instance_id(self):
+        """
+        The identifier of the DXL client instance that sent the message
+        (set by the broker that initially receives the message)
+        """
+        return self._source_client_instance_id
+
+    @source_client_instance_id.setter
+    def source_client_instance_id(self, client_instance_id=None):
+        if client_instance_id is None:
+            client_instance_id = ''
+        self._source_client_instance_id = client_instance_id
+
     def _pack_message_v2(self, packer, buf):
         """
         Packs the v2 message members to the `buffer`
@@ -332,6 +352,23 @@ class Message(ABCMeta('ABC', (_BaseObject,), {'__slots__': ()})): # compatible m
         """
         self._source_tenant_guid = self._unpack_next_unicode_string(unpacker)
         self._destination_tenant_guids = self._unpack_next_unicode_string_array(unpacker)
+
+    def _pack_message_v3(self, packer, buf):
+        """
+        Packs the v3 message members to the `buffer`
+
+        :param packer: The packer
+        :param buf: Object to which the bytes will be written
+        """
+        buf.write(packer.pack(self._source_client_instance_id))
+
+    def _unpack_message_v3(self, unpacker):
+        """
+        Unpacks the v3 members of the message from `unpacker`.
+
+        :param unpacker: The unpacker
+        """
+        self._source_client_instance_id = self._unpack_next_unicode_string(unpacker)
 
     def _to_bytes(self):
         """
@@ -357,6 +394,9 @@ class Message(ABCMeta('ABC', (_BaseObject,), {'__slots__': ()})): # compatible m
         # Version 2
         if self._version > 1:
             self._pack_message_v2(packer, buf)
+        # Version 3
+        if self._version > 2:
+            self._pack_message_v3(packer, buf)
         return buf.getvalue()
 
     @staticmethod
@@ -401,6 +441,9 @@ class Message(ABCMeta('ABC', (_BaseObject,), {'__slots__': ()})): # compatible m
             # Version 2
             if message._version > 1:
                 message._unpack_message_v2(unpacker)
+            # Version 3
+            if message._version > 2:
+                message._unpack_message_v3(unpacker)
             return message
 
         raise DxlException("Unknown message type: " + str(message_type))
