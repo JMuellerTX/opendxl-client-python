@@ -147,11 +147,16 @@ def _on_disconnect_run(client, userdata, rc):  # pylint: disable=invalid-name
         logger.debug("Disconnected with result code %s", str(rc))
     else:
         logger.error("Unexpected disconnect with result code %s", str(rc))
+        if self._destroyed or self._config is None:
+            return
         # Disconnect the client
         self._disconnect()
         # Connect the client
-        if self.config.reconnect_when_disconnected:
-            self._start_connect_thread()
+        with self._connect_lock:
+            if self._destroyed or self._config is None:
+                return
+            if self._config.reconnect_when_disconnected and self._thread is None:
+                self._start_connect_thread()
 
 
 def _on_message(client, userdata, msg): # pylint: disable=invalid-name
@@ -628,6 +633,9 @@ class DxlClient(_BaseObject):
     def _destroy(self, wait_complete=True):
         with self._destroy_lock:
             if not self._destroyed:
+                with self._connect_lock:
+                    self._destroyed = True
+
                 if self._service_manager:
                     self._service_manager.destroy()
                     self._service_manager = None
@@ -641,13 +649,12 @@ class DxlClient(_BaseObject):
                 if self._thread_pool:
                     self._thread_pool.shutdown(wait_complete)
 
-                self._config = None
+                with self._connect_lock:
+                    self._config = None
 
-                if self._client:
-                    self._client.user_data_set(None)
-                    self._client = None
-
-                self._destroyed = True
+                    if self._client:
+                        self._client.user_data_set(None)
+                        self._client = None
 
     def disconnect(self):
         """
@@ -680,15 +687,16 @@ class DxlClient(_BaseObject):
         if self._service_manager:
             self._service_manager.on_disconnect()
 
-        logger.debug("Waiting for thread pool completion...")
-        self._thread_pool.wait_completion()
+        if self._thread_pool:
+            logger.debug("Waiting for thread pool completion...")
+            self._thread_pool.wait_completion()
 
         # Iterate over a snapshot; the set may be modified concurrently by
         # subscribe()/unsubscribe() calls from other threads.
         with self._subscriptions_lock:
             subscriptions = tuple(self._subscriptions)
         for subscription in subscriptions:
-            if self.connected:
+            if self.connected and self._client is not None:
                 try:
                     logger.debug("Unsubscribing from %s", subscription)
                     result, mid = self._client.unsubscribe(subscription)
@@ -701,11 +709,12 @@ class DxlClient(_BaseObject):
 
         # In case of a reconnect after connection loss, the event loop will
         # not be stopped and the client will not be forcefully disconnected.
-        logger.debug("Stopping event loop...")
-        self._client.loop_stop()
-        logger.debug("Trying to disconnect client...")
-        self._client.disconnect()
-        logger.debug("Disconnected.")
+        if self._client is not None:
+            logger.debug("Stopping event loop...")
+            self._client.loop_stop()
+            logger.debug("Trying to disconnect client...")
+            self._client.disconnect()
+            logger.debug("Disconnected.")
 
         # Make sure the connection loop is done
         self._terminate_connect_thread()

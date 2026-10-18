@@ -169,11 +169,17 @@ class Broker(_BaseObject):
         if len(elements) == 2:
             protocol = elements[0]
             host_name = elements[1]
+        if not host_name:
+            raise MalformedBrokerUriException("Invalid broker URI")
         if host_name[-1] != ']':
+            if host_name[0] != '[' and host_name.count(':') > 1:
+                raise MalformedBrokerUriException("Invalid broker URI")
             host_name_left, _, host_name_right = host_name.rpartition(":")
             if host_name_left:
                 host_name = host_name_left
                 port = host_name_right
+            if host_name[-1] != ']' and ":" in host_name:
+                raise MalformedBrokerUriException("Invalid broker URI")
         broker.host_name = host_name
         broker.port = port
         broker.unique_id = UuidGenerator.generate_id_as_string()
