@@ -245,7 +245,7 @@ class DxlClientConfig(_BaseObject):
         # The list of brokers
         self._brokers = brokers
         # The list of WebSocket brokers
-        self._websocket_brokers = websocket_brokers
+        self._websocket_brokers = websocket_brokers if websocket_brokers is not None else []
         # Whether to use WebSockets or regular MQTT over tcp. Defaults to
         # WebSockets only if exclusively WebSocket brokers were specified
         # (consistent with :meth:`create_dxl_config_from_file`).
@@ -384,7 +384,7 @@ class DxlClientConfig(_BaseObject):
                     else:
                         value = None
                     break
-            if value:
+            if value is not None:
                 break
         return value
 
@@ -1045,43 +1045,39 @@ class DxlClientConfig(_BaseObject):
         self._update_broker_config_model(self._websocket_brokers, self._BROKERS_WEBSOCKETS_SECTION)
 
     def _update_broker_config_model(self, brokers, config_section):
+        brokers_for_config = OrderedDict()
+        # A `unique_id` is not required for the in-memory representation of
+        # a `Broker` object but it effectively is required when persisting
+        # the broker configuration to a file. If no `unique_id` is found
+        # on the `Broker` object, assign a random one as the key for the
+        # broker config section so that the file can at least be persisted.
+        for broker in (brokers or ()):
+            unique_id = broker.unique_id if broker.unique_id else \
+                UuidGenerator.generate_id_as_string()
+            brokers_for_config[unique_id] = broker._to_broker_string()
 
-        if brokers is None:
-            self._set_value_to_config(config_section, None)
-        else:
-            brokers_for_config = OrderedDict()
-            # A `unique_id` is not required for the in-memory representation of
-            # a `Broker` object but it effectively is required when persisting
-            # the broker configuration to a file. If no `unique_id` is found
-            # on the `Broker` object, assign a random one as the key for the
-            # broker config section so that the file can at least be persisted.
-            for broker in brokers:
-                unique_id = broker.unique_id if broker.unique_id else \
-                    UuidGenerator.generate_id_as_string()
-                brokers_for_config[unique_id] = broker._to_broker_string()
+        # In order to attempt to preserve any comments that may have been
+        # added to the configuration file for a pre-existing broker, this
+        # code preserves the `configobj` model objects which already
+        # exist for the brokers being set.
+        current_brokers = self._get_value_from_config(
+            config_section)
+        if current_brokers is not None:
+            brokers_to_delete = []
 
-            # In order to attempt to preserve any comments that may have been
-            # added to the configuration file for a pre-existing broker, this
-            # code preserves the `configobj` model objects which already
-            # exist for the brokers being set.
-            current_brokers = self._get_value_from_config(
-                config_section)
-            if current_brokers is not None:
-                brokers_to_delete = []
+            for current_broker_key in current_brokers.keys():
+                if current_broker_key not in brokers_for_config:
+                    brokers_to_delete.append(current_broker_key)
 
-                for current_broker_key in current_brokers.keys():
-                    if current_broker_key not in brokers_for_config:
-                        brokers_to_delete.append(current_broker_key)
+            # `configobj` model entries not present in the brokers to be set
+            # are deleted - along with any associated comments.
+            for broker_to_delete in brokers_to_delete:
+                del current_brokers[broker_to_delete]
 
-                # `configobj` model entries not present in the brokers to be set
-                # are deleted - along with any associated comments.
-                for broker_to_delete in brokers_to_delete:
-                    del current_brokers[broker_to_delete]
-
-                # The `merge` updates the values for pre-existing keys and adds in
-                # new key/value pairs which are not already present in the config
-                # model.
-                current_brokers.merge(brokers_for_config)
+            # The `merge` updates the values for pre-existing keys and adds in
+            # new key/value pairs which are not already present in the config
+            # model.
+            current_brokers.merge(brokers_for_config)
 
     def write(self, file_path):
         """

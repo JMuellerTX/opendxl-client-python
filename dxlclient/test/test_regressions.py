@@ -148,6 +148,25 @@ class MessageWireFormatTest(unittest.TestCase):
             Message._from_bytes(raw)
         self.assertIn("99", str(context.exception))
 
+    def test_v3_message_round_trip_preserves_source_client_instance_id(self):
+        import io
+        import msgpack
+        packer = msgpack.Packer(use_bin_type=False)
+        buf = io.BytesIO()
+        for obj in (3, Message.MESSAGE_TYPE_EVENT, "{id}", "{src}", "{brk}",
+                    [], [], b"payload", ["k1", "v1"], "{tenant}", ["{dest}"],
+                    "{instance-123}"):
+            buf.write(packer.pack(obj))
+
+        unpacked = Message._from_bytes(buf.getvalue())
+        self.assertEqual(3, unpacked.version)
+        self.assertEqual("{instance-123}", unpacked.source_client_instance_id)
+
+        reencoded = Message._from_bytes(unpacked._to_bytes())
+        self.assertEqual(3, reencoded.version)
+        self.assertEqual("{instance-123}", reencoded.source_client_instance_id)
+        self.assertEqual({"k1": "v1"}, reencoded.other_fields)
+
 
 class MockDxlClient(object):
     def __init__(self, fail_send=False):
@@ -254,6 +273,24 @@ class SaveToFileTest(unittest.TestCase):
 
 
 class ClientConfigRegressionTest(unittest.TestCase):
+
+    def test_write_config_with_default_websocket_brokers_round_trips(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            config_file = os.path.join(temp_dir, "dxlclient.config")
+            config = DxlClientConfig(
+                broker_ca_bundle="ca.crt",
+                cert_file="client.crt",
+                private_key="client.key",
+                brokers=[Broker(host_name="broker.local", unique_id="b1",
+                                ip_address="127.0.0.1", port=8883)])
+            config.write(config_file)
+            reloaded = DxlClientConfig.create_dxl_config_from_file(config_file)
+            self.assertEqual(1, len(reloaded.brokers))
+            self.assertEqual("b1", reloaded.brokers[0].unique_id)
+            self.assertEqual(0, len(reloaded.websocket_brokers))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_websockets_default_when_only_websocket_brokers_given(self):
         config = DxlClientConfig(broker_ca_bundle="ca.crt",
