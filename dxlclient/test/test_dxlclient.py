@@ -353,6 +353,25 @@ class DxlClientTest(unittest.TestCase):
         self.client.disconnect()
         self.client.disconnect()
 
+    def test_on_disconnect_run_after_destroy_does_not_spawn_thread(self):
+        from dxlclient.client import _on_disconnect_run
+        self.client._start_connect_thread = Mock()
+        self.client.destroy()
+        _on_disconnect_run(None, self.client, 1)
+        self.assertEqual(0, self.client._start_connect_thread.call_count)
+
+    def test_on_disconnect_run_while_connect_thread_active_does_not_spawn_second_thread(self):
+        from dxlclient.client import _on_disconnect_run
+        existing_thread = Mock()
+        self.client._disconnect = Mock()
+        self.client._thread = existing_thread
+        self.client._start_connect_thread = Mock()
+        try:
+            _on_disconnect_run(None, self.client, 1)
+            self.assertEqual(0, self.client._start_connect_thread.call_count)
+        finally:
+            self.client._thread = None
+
     @parameterized.expand([
         # (connect + retries) * 2 = connect_count
         (0, 2),

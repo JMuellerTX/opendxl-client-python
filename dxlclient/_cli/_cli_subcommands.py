@@ -869,7 +869,9 @@ class UpdateConfigSubcommand(Subcommand):  # pylint: disable=no-init
                                      broker["ipAddress"],
                                      broker["port"]) for broker in brokers]
             websocket_brokers = response_dict.get("webSocketBrokers")
-            if websocket_brokers:
+            if websocket_brokers is None:
+                websocket_brokers = response_dict.get("brokersWebSockets")
+            if websocket_brokers is not None:
                 config.websocket_brokers = [Broker(broker["hostName"],
                                                    broker["guid"],
                                                    broker["ipAddress"],

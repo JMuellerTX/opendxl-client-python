@@ -133,6 +133,18 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual("ff02::1", broker.host_name)
         self.assertEqual(8993, broker.port)
 
+    @parameterized.expand([
+        ("",),
+        ("ssl://",),
+        ("ff02::1",),
+        ("ssl://2001:db8::1",),
+        ("::1",),
+        (":8883",),
+    ])
+    @raises(MalformedBrokerUriException)
+    def test_parse_url_invalid_raises_exception(self, url):
+        Broker.parse(url)
+
     def test_attributes(self):
         self.assertEqual("", self.broker.unique_id)
         self.assertEqual("localhost", self.broker.host_name)

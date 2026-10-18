@@ -655,6 +655,44 @@ class CliTest(unittest.TestCase):
             config_from_file = slurp_file_into_bytes(config_file)
             self.assertEqual(expected_config_content, config_from_file)
 
+    def test_updateconfig_brokers_websockets_and_empty_list(self):
+        with _TempDir("updateconfig_ws_keys") as temp_dir, \
+                requests_mock.mock(case_sensitive=True) as req_mock:
+            ca_bundle_file = os.path.join(temp_dir, "ca-bundle.crt")
+            DxlUtils.save_to_file(ca_bundle_file, "old ca")
+            config_file = os.path.join(temp_dir, "dxlclient.config")
+            DxlUtils.save_to_file(config_file, make_config())
+
+            req_mock.get(get_server_client_ca_url("myhost"),
+                         text=get_mock_ca_bundle_response_func())
+
+            # Case 1: opendxl-console returns "brokersWebSockets" instead of "webSocketBrokers"
+            console_brokers = make_broker_dict(1)
+            console_brokers["brokersWebSockets"] = console_brokers.pop("webSocketBrokers")
+            req_mock.get(get_server_broker_list_url("myhost"),
+                         text=get_mock_broker_list_response_func(console_brokers))
+
+            with patch("sys.argv", command_args(["updateconfig", temp_dir, "myhost",
+                                                 "-u", "myuser", "-p", "mypass"])):
+                cli_run()
+
+            from dxlclient.client_config import DxlClientConfig
+            loaded = DxlClientConfig.create_dxl_config_from_file(config_file)
+            self.assertEqual(1, len(loaded.websocket_brokers))
+
+            # Case 2: empty list clears websocket_brokers
+            empty_ws = make_broker_dict(1)
+            empty_ws["webSocketBrokers"] = []
+            req_mock.get(get_server_broker_list_url("myhost"),
+                         text=get_mock_broker_list_response_func(empty_ws))
+
+            with patch("sys.argv", command_args(["updateconfig", temp_dir, "myhost",
+                                                 "-u", "myuser", "-p", "mypass"])):
+                cli_run()
+
+            loaded = DxlClientConfig.create_dxl_config_from_file(config_file)
+            self.assertEqual(0, len(loaded.websocket_brokers))
+
     def test_updateconfig_with_trusted_ca_cert_and_port(self):
         with _TempDir("updateconfig_ca_port") as temp_dir, \
                 requests_mock.mock(case_sensitive=True) as req_mock:
